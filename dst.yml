@@ -1,0 +1,301 @@
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: DST_VPC
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+  DstSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for DST Dedicated Server"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: udp
+          FromPort: 11000
+          ToPort: 11001
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 27018
+          ToPort: 27019
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 8768
+          ToPort: 8769
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 13.48.4.200/30 # SSH from designated IP range
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: DST_RouteTable
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+
+  DstDedicatedServer:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      InstanceType: "t3.medium" # 2 vCPUs, 4 GiB RAM
+      ImageId: "ami-abcd1234" # Ubuntu-based AMI
+      KeyName: "my-key-pair"
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          SubnetId: !Ref Subnet
+          GroupSet:
+            - !Ref DstSecurityGroup
+          DeviceIndex: 0
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: 16
+            VolumeType: "gp3"
+            DeleteOnTermination: true # false if you want to keep the volume to later attach to another instance
+      UserData: !Base64 |
+          #!/bin/bash -xe
+          su - ubuntu -c "bash -xe" <<'EOF'
+          CLUSTER_NAME="My-DST-Server"
+          CLUSTER_DESCRIPTION="My-Server-Description"
+          CLUSTER_PASSWORD="My-Server-Password"
+          CLUSTER_KEY="My-Server-Key
+          ADMIN_ID="My-Klei-ID"
+          TOKEN="My-Cluster-Token"
+          STEAMCMD_URL="https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz"
+
+          # Update and install dependencies
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -y
+          sudo apt-get install -y libstdc++6:i386 libgcc1:i386 libcurl4-gnutls-dev:i386 wget || { echo "Failed to install dependencies"; exit 1; }
+
+          # Install SteamCMD
+          mkdir -p ~/steamcmd
+          cd ~/steamcmd || exit
+          wget "$STEAMCMD_URL" -O steamcmd_linux.tar.gz || { echo "Failed to download SteamCMD"; exit 1; }
+          tar -xvzf steamcmd_linux.tar.gz || { echo "Failed to extract SteamCMD"; exit 1; }
+
+          # Create DST Server Directories
+          DST_DIR="$HOME/.klei/DoNotStarveTogether/MyDediServer"
+          mkdir -p "$DST_DIR/Master" "$DST_DIR/Caves"
+
+          # Configuration Files
+          echo "[GAMEPLAY]
+          game_mode = endless
+          max_players = 8
+          pvp = false
+          pause_when_empty = true
+
+          [NETWORK]
+          cluster_description = $CLUSTER_DESCRIPTION
+          cluster_name = $CLUSTER_NAME
+          cluster_password = $CLUSTER_PASSWORD
+
+          [MISC]
+          console_enabled = true
+
+          [SHARD]
+          shard_enabled = true
+          bind_ip = 127.0.0.1
+          master_ip = 127.0.0.1
+          master_port = 10889
+          cluster_key = $CLUSTER_KEY" > "$DST_DIR/cluster.ini"
+
+          echo "$TOKEN" > "$DST_DIR/cluster_token.txt"
+          echo "$ADMIN_ID" > "$DST_DIR/adminlist.txt"
+
+          # Master Shard Configuration
+          echo "[NETWORK]
+          server_port = 11000
+
+          [SHARD]
+          is_master = true
+
+          [STEAM]
+          master_server_port = 27018
+          authentication_port = 8768" > "$DST_DIR/Master/server.ini"
+
+          echo 'return {
+              override_enabled = true,
+              preset = "ENDLESS",
+              overrides={
+                basicresource_regrowth = "always",
+                ghostsanitydrain = "none",
+                ghostenabled="none",
+                has_ocean=true,
+                keep_disconnected_tiles=true,
+                no_joining_islands=true,
+                no_wormholes_to_disconnected_tiles=true,
+                portalresurection="always",
+                world_size="huge",
+                wildfires="never",
+                moon_starfish="often",
+                moon_bullkelp="often",
+                berrybush="often",
+                rock="often",
+                ocean_bullkelp="often",
+                cactus="often",
+                carrot="often",
+                flint="often",
+                flowers="often",
+                grass="often",
+                moon_hotspring="often",
+                moon_rock="often",
+                moon_sapling="often",
+                moon_tree="often",
+                meteorspawner="often",
+                rock_ice="often",
+                mushroom="often",
+                ponds="often",
+                reeds="often",
+                sapling="often",
+                ocean_seastack="ocean_often",
+                marshbush="often",
+                moon_berrybush="often",
+                trees="mostly",
+                tumbleweed="often",
+              },
+          }' > "$DST_DIR/Master/worldgenoverride.lua"
+
+          # Caves Shard Configuration
+          echo "[NETWORK]
+          server_port = 11001
+
+          [SHARD]
+          is_master = false
+          name = Caves
+
+          [STEAM]
+          master_server_port = 27019
+          authentication_port = 8769" > "$DST_DIR/Caves/server.ini"
+
+          echo 'return {
+              override_enabled = true,
+              preset = "DST_CAVE",
+              overrides = {
+                berrybush="often",
+                rock="often",
+                banana="often",
+                fern="often",
+                flint="often",
+                wormlights="often",
+                grass="often",
+                lichen="often",
+                flower_cave="often",
+                mushtree="often",
+                mushroom="often",
+                cave_ponds="often",
+                reeds="often",
+                sapling="often",
+                marshbush="often",
+                trees="mostly",
+              },
+          }' > "$DST_DIR/Caves/worldgenoverride.lua"
+
+          # Download and install DST Dedicated Server
+          cd "$HOME/steamcmd"
+          INSTALL_DIR="$HOME/dontstarvetogether_dedicated_server"
+          ./steamcmd.sh +force_install_dir "$INSTALL_DIR" +login anonymous +app_update 343050 validate +quit
+
+          # Install and enable mods
+          MOD_DIR="$INSTALL_DIR/mods"
+          mkdir -p "$MOD_DIR"
+          echo 'ServerModSetup("1852257480")
+          ServerModSetup("1185229307")
+          ServerModSetup("501385076")
+          ServerModSetup("1111658995")
+          ServerModSetup("362175979")
+          ServerModSetup("458587300")
+          ServerModSetup("666155465")
+          ServerModSetup("378160973")
+          ServerModSetup("714719224")' > "$MOD_DIR/dedicated_server_mods_setup.lua"
+
+          echo 'return {
+              ["workshop-1852257480"]={ configuration_options={ }, enabled=true },
+              ["workshop-1185229307"]={ configuration_options={ }, enabled=true },
+              ["workshop-501385076"]={ configuration_options={ }, enabled=true },
+              ["workshop-1111658995"]={ configuration_options={ }, enabled=true },
+              ["workshop-362175979"]={ configuration_options={ }, enabled=true },
+              ["workshop-458587300"]={ configuration_options={ }, enabled=true },
+              ["workshop-666155465"]={ configuration_options={ }, enabled=true },
+              ["workshop-378160973"]={ configuration_options={ }, enabled=true },
+              ["workshop-714719224"]={ configuration_options={ }, enabled=true },
+          }' > "$DST_DIR/Master/modoverrides.lua"
+
+          cp "$DST_DIR/Master/modoverrides.lua" "$DST_DIR/Caves/modoverrides.lua"
+
+          # Create script to run DST Dedicated Server
+          echo '#!/bin/bash
+          cd "$HOME/dontstarvetogether_dedicated_server/bin64" || exit
+          run_shared=(./dontstarve_dedicated_server_nullrenderer_x64)
+          run_shared+=(-console)
+          run_shared+=(-cluster MyDediServer)
+          run_shared+=(-monitor_parent_process $$)
+
+          "${run_shared[@]}" -shard Caves | sed "s/^/Caves:  /" &
+          "${run_shared[@]}" -shard Master | sed "s/^/Master: /"' > "$HOME/run_dedicated_servers.sh"
+
+          chmod +x "$HOME/run_dedicated_servers.sh"
+
+          # Create Systemd Service for Auto-Start
+          echo "[Unit]
+          Description=Don't Starve Together Dedicated Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=$USER
+          WorkingDirectory=$HOME
+          ExecStart=$HOME/run_dedicated_servers.sh
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target" | sudo tee /etc/systemd/system/dst_dedicated.service > /dev/null
+          
+          sudo systemctl enable dst_dedicated 
+          sudo systemctl start dst_dedicated
+          echo "DST Dedicated Server is now running!"
+          EOF
+
+Outputs:
+  InstanceId:
+    Description: "ID of the EC2 instance"
+    Value: !Ref DstDedicatedServer
